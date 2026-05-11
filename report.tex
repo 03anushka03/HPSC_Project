@@ -1,0 +1,428 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks,colorlinks=true,urlcolor=blue]{hyperref}
+
+\lstset{
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  language=C++,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=4pt,
+  frame=single,
+  breaklines=true,
+  tabsize=2,
+  captionpos=b
+}
+
+\begin{document}
+
+\title{OpenMP Parallelisation of a Two-Dimensional\\
+Ising Model Monte Carlo Simulation}
+
+\author{
+  \IEEEauthorblockN{Anushka Chauhan}
+  \IEEEauthorblockA{
+    Indian Institute of Technology Mandi\\
+    Roll No: B23310\\
+    \href{https://github.com/03anushka03/HPSC\_Project.git}{GitHub Repository}
+  }
+}
+
+\maketitle
+
+\begin{abstract}
+A two-dimensional Ising model is implemented and parallelised using OpenMP.
+The solver uses the Metropolis Monte Carlo algorithm on a square lattice with
+periodic boundary conditions. Physical observables including magnetisation,
+energy, heat capacity, and susceptibility are computed over a range of
+temperatures. The implementation is verified against the exact analytical
+critical temperature $T_c \approx 2.269\,J/k_B$. Two parallelisation
+strategies are explored: an embarrassingly parallel temperature sweep and a
+checkerboard lattice decomposition. Parallelisation improves performance for
+larger workloads, with speedup increasing with the number of temperature
+points being simulated.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Ising model, Monte Carlo, Metropolis algorithm, OpenMP, phase transition,
+parallel computing, checkerboard decomposition.
+\end{IEEEkeywords}
+
+% ─────────────────────────────────────────────────────────────
+\section{Introduction}
+
+The Ising model is one of the most studied models in statistical physics.
+It describes a system of interacting spins on a lattice and exhibits a
+phase transition between ordered and disordered states. Despite its
+simplicity, it captures the essential physics of ferromagnetism and
+serves as a standard benchmark for numerical methods.
+
+From a computational standpoint, Monte Carlo simulation of the Ising model
+is expensive. A single sweep over the lattice involves $N = L^2$ random
+spin flip attempts, each requiring evaluation of the local energy change.
+Running thousands of such sweeps over many temperature values leads to
+significant runtime.
+
+OpenMP is applied in this work to parallelise the simulation. The goals are
+to reduce runtime while maintaining physical correctness, and to analyse
+scaling behaviour with thread count.
+
+% ─────────────────────────────────────────────────────────────
+\section{Mathematical Model}
+
+Each site $(i,j)$ on an $L \times L$ lattice carries a spin
+$s_{i,j} \in \{+1, -1\}$. The Hamiltonian is
+
+\begin{equation}
+  H = -J \sum_{\langle i,j \rangle} s_i s_j,
+  \label{eq:H}
+\end{equation}
+
+where $J > 0$ is the coupling constant and the sum runs over nearest-neighbour
+pairs. Periodic boundary conditions are applied so that
+$s_{L,j} \equiv s_{0,j}$ and $s_{i,L} \equiv s_{i,0}$.
+
+\subsection{Contact Force Analogy}
+
+When two spins interact, the local energy change due to flipping spin
+$s_{i,j}$ is
+
+\begin{equation}
+  \Delta E = 2J\, s_{i,j} \sum_{\mathrm{nn}} s_k,
+  \label{eq:dE}
+\end{equation}
+
+where the sum is over the four nearest neighbours.
+Since $\Delta E \in \{-8J, -4J, 0, 4J, 8J\}$, only five distinct
+Boltzmann factors need to be evaluated per temperature, so they are
+pre-computed before each sweep.
+
+\subsection{Thermodynamic Observables}
+
+The magnetisation per spin and energy per spin are
+
+\begin{equation}
+  \langle|M|\rangle = \frac{1}{N}\left\langle\left|\sum_{i,j}s_{i,j}\right|\right\rangle,
+  \qquad
+  \langle E/N \rangle = \frac{\langle H \rangle}{N}.
+\end{equation}
+
+Heat capacity and susceptibility follow from fluctuations:
+
+\begin{equation}
+  C_v = \frac{\langle E^2\rangle - \langle E\rangle^2}{k_B T^2},
+  \qquad
+  \chi = \frac{N\!\left(\langle M^2\rangle - \langle M\rangle^2\right)}{k_B T}.
+  \label{eq:cv_chi}
+\end{equation}
+
+The exact Onsager critical temperature \cite{onsager1944} is
+
+\begin{equation}
+  T_c = \frac{2J}{k_B\ln(1+\sqrt{2})} \approx 2.269\,\frac{J}{k_B}.
+  \label{eq:tc}
+\end{equation}
+
+% ─────────────────────────────────────────────────────────────
+\section{Numerical Algorithm}
+
+The Metropolis Monte Carlo algorithm \cite{metropolis1953} generates a Markov
+chain whose stationary distribution is the Boltzmann distribution. One sweep
+consists of $N = L^2$ proposed single-spin flips:
+
+\begin{algorithm}
+\caption{Metropolis sweep}
+\begin{algorithmic}[1]
+\FOR{step $= 1$ \TO $N$}
+  \STATE Select site $(i,j)$ uniformly at random
+  \STATE Compute $\Delta E$ from \eqref{eq:dE}
+  \IF{$\Delta E < 0$ \OR $r < e^{-\Delta E/T}$, $r\sim\mathcal{U}(0,1)$}
+    \STATE Flip: $s_{i,j} \leftarrow -s_{i,j}$
+  \ENDIF
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+Each temperature point runs 5\,000 equilibration sweeps followed by
+10\,000 measurement sweeps. Observables are accumulated during the
+measurement phase and averaged at the end.
+
+The standard \texttt{rand()} function is not used because it is not
+thread-safe. Each thread instead owns a private \texttt{std::mt19937}
+Mersenne Twister instance seeded from a master generator.
+
+% ─────────────────────────────────────────────────────────────
+\section{Verification}
+
+Three tests are used to verify the implementation.
+
+\textit{Low-temperature behaviour.} At $T = 1.0\,J/k_B$ the system should
+be almost fully ordered. The simulation gives $|\langle M\rangle| = 0.9993$
+and $E/N = -1.997$, both within 0.3\% of the expected ground state values
+of 1 and $-2J$ respectively.
+
+\textit{High-temperature behaviour.} At $T = 5.0\,J/k_B$ the system should
+be disordered. The simulation gives $|\langle M\rangle| = 0.028$, consistent
+with a paramagnetic phase.
+
+\textit{Critical temperature.} The magnetisation drops sharply and $\chi$
+peaks near $T \approx 2.3\,J/k_B$, in good agreement with $T_c = 2.269$.
+The small offset is a known finite-size effect for $L = 50$
+\cite{ferdinand1969}.
+
+\begin{table}[h]
+\centering
+\caption{Verification summary ($L=50$, $J=k_B=1$)}
+\label{tab:verify}
+\begin{tabular}{lcc}
+\toprule
+Test & Expected & Simulated \\
+\midrule
+$|\langle M\rangle|$ at $T=1.0$ & $\approx 1.0$ & $0.9993$ \\
+$E/N$ at $T=1.0$ & $\approx -2.0$ & $-1.997$ \\
+$|\langle M\rangle|$ at $T=5.0$ & $\approx 0$ & $0.028$ \\
+$T_c$ (peak of $\chi$) & $2.269$ & $\approx 2.3$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Fig.~\ref{fig:mag} shows the magnetisation transition and
+Fig.~\ref{fig:energy} shows the energy curve. Both match the expected
+qualitative behaviour. The convergence of the statistical error with
+measurement sweeps is shown in Fig.~\ref{fig:conv}, confirming
+$\mathcal{O}(1/\sqrt{N})$ behaviour as expected for Monte Carlo.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{fig_mag.pdf}
+  \caption{Magnetisation vs temperature. The sharp drop near
+           $T_c = 2.269\,J/k_B$ (dashed) marks the phase transition.}
+  \label{fig:mag}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{fig_energy.pdf}
+  \caption{Energy per spin vs temperature. The smooth S-shaped curve is
+           characteristic of the second-order phase transition.}
+  \label{fig:energy}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_cv_chi.pdf}
+  \caption{Heat capacity $C_v$ (left) and susceptibility $\chi$ (right).
+           Both peak near $T_c$, with the offset from the exact value
+           being a finite-size effect.}
+  \label{fig:cvchi}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_snapshots.pdf}
+  \caption{Spin configurations on the $50\times50$ lattice. Blue $=-1$,
+           red $=+1$. Ordered phase (left), critical fluctuations (centre),
+           and disordered phase (right).}
+  \label{fig:snaps}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{fig_convergence.pdf}
+  \caption{Statistical error in $|\langle M\rangle|$ vs number of
+           measurement sweeps. The error follows $\mathcal{O}(1/\sqrt{N})$
+           as expected for Monte Carlo.}
+  \label{fig:conv}
+\end{figure}
+
+% ─────────────────────────────────────────────────────────────
+\section{Profiling}
+
+Profiling was carried out to identify which parts of the code take the most
+time. It was found that the Metropolis sweep dominates the total runtime.
+
+This is expected: for each of the 41 temperature points, the inner loop
+performs $N = 2{,}500$ spin-flip attempts per sweep, repeated
+15\,000 times (5\,000 equilibration + 10\,000 measurement). The total
+number of spin-flip evaluations is approximately $1.5 \times 10^9$.
+
+The observable calculation (\texttt{calculate\_magnetization} and
+\texttt{calculate\_energy}), file I/O, and lattice initialisation together
+account for less than 7\% of runtime. These are not the primary target
+for parallelisation.
+
+The total serial runtime for 41 temperature points on an $L=50$ lattice
+was measured at $\mathbf{61{,}274}$~ms.
+
+% ─────────────────────────────────────────────────────────────
+\section{Parallelisation}
+
+OpenMP is used to parallelise the simulation. Two strategies are implemented.
+
+\subsection{Strategy 1: Parallel Temperature Loop}
+
+Each temperature point is an independent simulation with its own copy of the
+lattice. These can be run in parallel without any shared state:
+
+\begin{lstlisting}[caption={Strategy 1 — parallel temperature sweep}]
+#pragma omp parallel for schedule(dynamic)
+for (int ti = 0; ti < n_temps; ++ti) {
+    double T = T_min + ti * dT;
+    vector<vector<int>> spin(L, vector<int>(L));
+    initialize_lattice(spin, L, tid);
+    run_simulation(spin, L, T, J, ...);
+}
+\end{lstlisting}
+
+Dynamic scheduling is used because the equilibration cost varies with
+temperature (critical slowing-down is more severe near $T_c$).
+
+\subsection{Strategy 2: Checkerboard Decomposition}
+
+For a single large lattice, spins cannot all be updated simultaneously
+because updating one spin changes the energy of its neighbours, leading to
+race conditions. The checkerboard (red-black) scheme avoids this by
+partitioning the lattice into two sub-lattices where no two sites of the
+same colour are neighbours of each other:
+
+\begin{lstlisting}[caption={Strategy 2 — checkerboard sweep}]
+for (int colour = 0; colour < 2; ++colour) {
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < L; ++i) {
+        for (int j = (i+colour)%2; j < L; j+=2) {
+            // all same-colour sites are independent
+            double dE = compute_deltaE(spin,i,j,L,J);
+            if (dE<0 || rand01(tid)<exp(-dE/T))
+                spin[i][j] *= -1;
+        }
+    }
+} // implicit barrier between colour passes
+\end{lstlisting}
+
+The implicit OpenMP barrier at the end of each \texttt{parallel for}
+ensures correctness: the red sub-lattice is fully updated before the
+black sub-lattice begins, preserving detailed balance.
+
+Thread safety is achieved by assigning each thread its own
+\texttt{std::mt19937} random number generator. The original code used a
+global \texttt{rand()} call and a global timing accumulator
+(\texttt{metro\_time}); both are race conditions and have been removed.
+File writes are protected by \texttt{\#pragma omp critical}.
+
+% ─────────────────────────────────────────────────────────────
+\section{Performance Analysis}
+
+Speedup and efficiency are defined as
+
+\begin{equation}
+  S(p) = \frac{T_1}{T_p}, \qquad E(p) = \frac{S(p)}{p},
+\end{equation}
+
+where $T_p$ is wall-clock time with $p$ threads.
+
+Profiling showed that approximately 93\% of runtime is in the Metropolis
+sweep, giving a parallel fraction $f = 0.93$. Amdahl's Law then predicts a
+theoretical maximum speedup of $1/(1-f) \approx 14\times$.
+
+Fig.~\ref{fig:speedup} shows the strong-scaling behaviour and
+Fig.~\ref{fig:runtime} shows the wall-clock times.
+For small thread counts the speedup is close to ideal. Efficiency drops
+at higher thread counts due to thread management overhead and the serial
+fraction in observable computation and I/O.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_speedup.pdf}
+  \caption{Speedup $S(p)$ (left) and efficiency $E(p)$ (right) vs thread
+           count for Strategy~1. Dashed lines show ideal linear scaling.}
+  \label{fig:speedup}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{fig_runtime.pdf}
+  \caption{Wall-clock time for serial and parallel ($p=2$) runs at
+           different workload sizes. Parallel provides clear benefit at
+           larger numbers of temperature points.}
+  \label{fig:runtime}
+\end{figure}
+
+For small workloads (a single temperature point) the parallel version is
+slightly slower than serial due to thread creation and synchronisation
+overhead. This is the same behaviour observed in the DEM solver
+\cite{dem_report}: parallelisation only pays off when there is enough
+work per thread.
+
+% ─────────────────────────────────────────────────────────────
+\section{Conclusion}
+
+The Ising model Monte Carlo solver produces correct results for all
+verification tests. The magnetisation, energy, heat capacity, and
+susceptibility all behave as expected, with the phase transition observed
+near the exact Onsager value $T_c = 2.269\,J/k_B$.
+
+Parallelisation using OpenMP improves performance, especially when many
+temperature points are simulated in parallel. The embarrassingly parallel
+temperature sweep (Strategy~1) is more effective for this workload than
+the checkerboard decomposition, since it requires no synchronisation inside
+the inner loop. However, Strategy~2 remains useful when a single large
+lattice must be updated and memory constraints prevent replication.
+
+Further improvements could include cluster algorithms (Wolff
+\cite{wolff1989}) to eliminate critical slowing-down, or reducing the
+observable calculation serial fraction using \texttt{omp reduction}.
+
+\section*{Acknowledgements}
+
+Some help from large language models (ChatGPT and Claude) was used for
+debugging, plot generation, and \LaTeX{} fixes.
+
+% ─────────────────────────────────────────────────────────────
+\begin{thebibliography}{9}
+
+\bibitem{onsager1944}
+L.~Onsager,
+``Crystal statistics. I. A two-dimensional model with an order-disorder
+transition,''
+\emph{Phys.\ Rev.}, vol.~65, pp.~117--149, 1944.
+
+\bibitem{metropolis1953}
+N.~Metropolis \emph{et al.},
+``Equation of state calculations by fast computing machines,''
+\emph{J.\ Chem.\ Phys.}, vol.~21, no.~6, pp.~1087--1092, 1953.
+
+\bibitem{ferdinand1969}
+A.~E.~Ferdinand and M.~E.~Fisher,
+``Bounded and inhomogeneous Ising models,''
+\emph{Phys.\ Rev.}, vol.~185, pp.~832--846, 1969.
+
+\bibitem{wolff1989}
+U.~Wolff,
+``Collective Monte Carlo updating for spin systems,''
+\emph{Phys.\ Rev.\ Lett.}, vol.~62, pp.~361--364, 1989.
+
+\bibitem{dem_report}
+A.~Chauhan,
+``OpenMP parallelisation of a three-dimensional discrete element method
+solver,''
+IIT Mandi, B23310, 2025.
+
+\bibitem{newman1999}
+M.~E.~J.~Newman and G.~T.~Barkema,
+\emph{Monte Carlo Methods in Statistical Physics}.
+Oxford: Clarendon Press, 1999.
+
+\end{thebibliography}
+
+\end{document}
